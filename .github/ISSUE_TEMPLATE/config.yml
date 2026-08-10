@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Read before you code
+    url: https://github.com/Sebiy/sprayhub/blob/master/docs/ISSUES.md
+    about: Open bugs, tried fixes, and the next things to try — read this first.
+  - name: Quick notes log
+    url: https://github.com/Sebiy/sprayhub/blob/master/LOG.md
+    about: In-the-trenches "who tried what" running log (append an entry with the template).

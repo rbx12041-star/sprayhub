@@ -1,0 +1,20 @@
+name: "💡 Idea / request"
+description: "Suggest a feature, improvement, or thing you want added."
+title: "[idea] "
+labels: [idea]
+body:
+  - type: textarea
+    id: details
+    attributes:
+      label: What & why
+      description: Describe it. How would we know it's done right?
+    validations:
+      required: true
+  - type: dropdown
+    id: pri
+    attributes:
+      label: Your priority guess
+      options:
+        - nice-to-have
+        - high
+        - blocker-for-other-work

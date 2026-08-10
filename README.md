@@ -4,7 +4,7 @@ An auto-paint script hub for the Roblox game **"Spray Paint!"** (placeId `599116
 
 Instead of hand-forging remotes, SprayHub **rides the game's own paint pipeline** — it calls the exact same client modules the real spray-can UI uses (`makePaintFromPaintSettings` → `cachePaint` → `sendToServer`), fetching a fresh anticheat token pair from the game's obfuscated `WarnModule` on every flush. To the server it looks like a normal player painting — because mechanically it is.
 
-> Private dev repo. This is the in-progress project of [@Sebiy](https://github.com/Sebiy) + collaborators. If you were added here to help, start with **`docs/ISSUES.md`** (what's broken) and **`docs/LOG-template.md`** (how to note what you tried).
+> Private dev repo. This is the in-progress project of [@Sebiy](https://github.com/Sebiy) + collaborators. If you were added here to help: read **`CONTRIBUTING.md`** (the organized workflow) → **`docs/ISSUES.md`** (what's broken) → **`docs/SETUP-AGENT.md`** (recreate the agent loop on your machine). Note what you try in `LOG.md` using `docs/LOG-template.md`, and file tracked work as an Issue.
 
 ---
 
@@ -14,11 +14,14 @@ Instead of hand-forging remotes, SprayHub **rides the game's own paint pipeline*
 |---|---|
 | `sprayhub.luau` | **The hub.** Paste/inject into an executor in-game. Builds a draggable in-game UI (RightCtrl / F4 to toggle) and drives paint through the game's own modules. |
 | `img2grid.js` | **URL → wall-image decoder (Node).** Downloads a PNG, decodes it (inflate + unfilter, no deps), downscales, and emits a Luau pixel table the hub can paint. Run `node img2grid.js <url> [maxW] [maxH]`. |
+| `CONTRIBUTING.md` | **The organized workflow** — branches, PRs, what to update when, do/don't. Read this before pushing anything. |
+| `docs/SETUP-AGENT.md` | How a helper runs **their own agent + in-game bridge** to recreate this build loop (drive the client from an LLM). |
 | `docs/PAINT-PIPELINE.md` | Full technical reference: the reversed paint pipeline, anticheat keys, server caps, paint-trim behavior. Read this before touching paint code. |
 | `docs/ISSUES.md` | **What's not working** + every fix already tried + the fixes to try next. The single source of truth for open bugs. |
 | `docs/LOG-template.md` | A template friends copy into `LOG.md` to record what they tried, or to file requests/ideas. |
 | `LOG.md` | The running log of attempts + requests from everyone helping. |
 | `CHANGELOG.md` | What changed, version to version. |
+| `.github/ISSUE_TEMPLATE/*` | Structured forms for **bug/tried** and **idea/request** so tracked work stays tidy. |
 
 ---
 

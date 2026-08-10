@@ -1,0 +1,34 @@
+name: "🐞 Bug / thing I tried"
+description: "Something's not working, or log a fix you attempted (with numbers)."
+title: "[bug] "
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Fill this with **what broke and the numbers you saw**. Verify paint with **live part counts** (non-`Client` parts under `workspace.PaintFolder[YourName]`), not the lagging `PaintCount` attribute.
+  - type: input
+    id: related
+    attributes:
+      label: Related open issue
+      description: "From docs/ISSUES.md (e.g. #1 multi-color), or write 'new'."
+  - type: textarea
+    id: tried
+    attributes:
+      label: What's not working / what you tried
+      description: What you changed or attempted, step by step.
+    validations:
+      required: true
+  - type: textarea
+    id: test
+    attributes:
+      label: How you tested it + before/after results
+      description: Exact steps + live paint counts before vs after.
+    validations:
+      required: true
+  - type: textarea
+    id: next
+    attributes:
+      label: Next lead / what someone should try next
+    validations:
+      required: false
