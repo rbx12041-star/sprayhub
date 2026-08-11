@@ -62,6 +62,7 @@ end
 --// Brush config ------------------------------------------------------------
 local Brush = {
 	color = Color3.fromRGB(255, 0, 0),
+	h = 0, s = 1, v = 1, -- HSV mirror of color (drives the picker UI)
 	size = 0.6,
 	shape = "Octagon",
 	layer = 1,
@@ -70,7 +71,8 @@ local Brush = {
 }
 local function currentColor() return Brush.color end
 local function applyBrush()
-	Brush.size = math.clamp(Brush.size, 0.1, SIZE_CAP)
+	Brush.size = math.clamp(Brush.size, 0.05, SIZE_CAP)
+	Brush.opacity = math.clamp(Brush.opacity, 0.05, 1)
 	PS:SetAttribute("Color", Brush.color)
 	PS:SetAttribute("Size", Brush.size)
 	PS:SetAttribute("BrushShape", Brush.shape)
@@ -142,7 +144,7 @@ end
 -- set EVERY attr right before the make (beats the game's periodic PaintSettings reset)
 local function paintBlob(cf, color)
 	PS:SetAttribute("Color", color)
-	PS:SetAttribute("Size", math.clamp(Brush.size, 0.1, SIZE_CAP))
+	PS:SetAttribute("Size", math.clamp(Brush.size, 0.05, SIZE_CAP))
 	PS:SetAttribute("BrushShape", Brush.shape)
 	PS:SetAttribute("Layer", Brush.layer)
 	PS:SetAttribute("Opacity", Brush.opacity)
@@ -158,21 +160,38 @@ local function flush()
 	ClientToServer.sendToServer(k1, k2)
 end
 
+local function colorKey(c) return ("%d,%d,%d"):format(math.floor(c.R*255+0.5), math.floor(c.G*255+0.5), math.floor(c.B*255+0.5)) end
+-- server persists ONE color per stroke (BUG#1: mixed-color batch dedups to 1 blob) ->
+-- split into per-color runs; each run is its own Stroke + its own flush.
 local function runPaintJob(blobList, opts)
 	opts = opts or {}
 	local batch = opts.batch or 40
+	-- group ALL blobs globally by color (one stroke per color, first-seen order) —
+	-- contiguous runs would shard interleaved images into a stroke per pixel.
+	local runs, seen = {}, {}
+	for _, b in ipairs(blobList) do
+		local ck = colorKey(b.color or currentColor())
+		local run = seen[ck]
+		if not run then run = { ck = ck, blobs = {} } seen[ck] = run table.insert(runs, run) end
+		table.insert(run.blobs, b)
+	end
 	local t = coroutine.create(function()
-		PS:SetAttribute("Stroke", (PS:GetAttribute("Stroke") or 0) + 1)
-		if UndoRedo then pcall(function() UndoRedo:InvokeServer({ Type = "Paint", Stroke = PS:GetAttribute("Stroke") }) end) end
 		local made = 0
-		for i, b in ipairs(blobList) do
+		for ri, run in ipairs(runs) do
 			if Hub.stopped then break end
-			if b.cf and paintBlob(b.cf, b.color or currentColor()) then made = made + 1 Hub.painted = Hub.painted + 1 end
-			if made % batch == 0 then flush() task.wait(FLUSH_RATE) end
-			task.wait()
+			PS:SetAttribute("Stroke", (PS:GetAttribute("Stroke") or 0) + 1)
+			if UndoRedo then pcall(function() UndoRedo:InvokeServer({ Type = "Paint", Stroke = PS:GetAttribute("Stroke") }) end) end
+			local n = 0
+			for _, b in ipairs(run.blobs) do
+				if Hub.stopped then break end
+				if b.cf and paintBlob(b.cf, b.color or currentColor()) then made = made + 1 n = n + 1 Hub.painted = Hub.painted + 1 end
+				if n % batch == 0 then flush() task.wait(FLUSH_RATE) end
+				task.wait()
+			end
+			flush()
+			if ri < #runs then task.wait(FLUSH_RATE) end
 		end
-		flush()
-		setStatus(("done: %d blobs (session %d)"):format(made, Hub.painted))
+		setStatus(("done: %d blobs, %d color runs (session %d)"):format(made, #runs, Hub.painted))
 	end)
 	table.insert(Hub.threads, t)
 	coroutine.resume(t)
@@ -253,7 +272,7 @@ local function buildSpraySpam(n, maxW, maxH)
 end
 
 --// Image paint: cursor-following preview + pixel-grid painting -------------
-local Image = { enabled = false, previewOn = false, cell = 0.6, frame = nil, part = nil, urlBox = nil }
+local Image = { enabled = false, previewOn = false, armed = false, cell = 0.6, frame = nil, part = nil, urlBox = nil, culled = nil, maxW = 40, maxH = 36 }
 
 -- orthonormal wall frame from a ray hit (right/up on the surface)
 local function frameFromHit(hit)
@@ -279,7 +298,7 @@ end
 
 local function updatePreview()
 	local data = getgenv().__imgdata
-	if not (Image.previewOn and data and data.w) then
+	if not ((Image.previewOn or Image.armed) and data and data.w) then
 		if Image.part then Image.part.Transparency = 1 end
 		return
 	end
@@ -294,11 +313,11 @@ local function updatePreview()
 			part.CanQuery = false
 			part.CastShadow = false
 			part.Material = Enum.Material.Neon
-			part.Color = Color3.fromRGB(120, 90, 220)
 			Image.part = part
 		end
 		Image.part.Size = Vector3.new(fw, fh, 0.2)
 		Image.part.Transparency = 0.5
+		Image.part.Color = Image.armed and Color3.fromRGB(255, 170, 40) or Color3.fromRGB(120, 90, 220)
 		local f = Image.frame
 		Image.part.CFrame = CFrame.fromMatrix(f.center + f.normal * 0.15, f.right, f.up)
 		if Image.part.Parent ~= workspace then Image.part.Parent = workspace end
@@ -309,6 +328,7 @@ end
 RunSvc.RenderStepped:Connect(updatePreview)
 
 -- build blob list from getgenv().__imgdata at a given wall frame
+-- returns list, err — on success also sets Image.culled = {tooFar, noRay}
 local function buildImage(f)
 	local data = getgenv().__imgdata
 	if not (data and data.px and data.w and data.h) then return nil, "no image loaded" end
@@ -318,6 +338,7 @@ local function buildImage(f)
 	local params = PaintPositioning.getRaycastParams()
 	local root = charPos()
 	local list = {}
+	local tooFar, noRay = 0, 0
 	local colW, colH = data.w, data.h
 	-- per-pixel ray to snap onto the real paintable surface (skips off-wall pixels)
 	for _, e in ipairs(data.px) do
@@ -330,18 +351,67 @@ local function buildImage(f)
 		if hit and hit.Instance:HasTag("PaintRaycast") then
 			if not root or (hit.Position - root).Magnitude <= MAX_DIST * 0.97 then
 				table.insert(list, { cf = faceCFrame(hit.Position, hit.Normal), color = Color3.fromRGB(r, g, b) })
+			else
+				tooFar += 1
 			end
+		else
+			noRay += 1
 		end
 	end
+	Image.culled = { tooFar = tooFar, noRay = noRay }
 	return list
 end
 
-local function paintImage()
-	local list, err = buildImage()
+local function paintImage(f)
+	local list, err = buildImage(f)
 	if not list then setStatus(err) return end
-	if #list == 0 then setStatus("nothing in range / too far") return end
+	if #list == 0 then setStatus("nothing in range / off-wall") return end
 	runPaintJob(list, { batch = 40 })
+	local c = Image.culled
+	if c and (c.tooFar > 0 or c.noRay > 0) then
+		task.defer(function()
+			task.wait(0.5)
+			setStatus(("painting %d px (skipped %d off-wall, %d too far)"):format(#list, c.noRay, c.tooFar))
+		end)
+	end
 end
+
+-- one-click: load URL -> arm placement -> click wall -> auto-draw
+local function loadImageFromUrl(url, onDone)
+	task.spawn(function()
+		setStatus("downloading + decoding…")
+		local enc = game:GetService("HttpService"):UrlEncode(url)
+		local ok, body = pcall(function()
+			return game:HttpGet(("http://localhost:17393/decode?url=%s&w=%d&h=%d"):format(enc, Image.maxW, Image.maxH))
+		end)
+		if not ok then setStatus("imgserver not running? (node imgserver.js)") return end
+		if not body or body:sub(1, 6) == "--ERR " then setStatus(body or "decode failed") return end
+		getgenv().__imgdata = nil
+		local fn, cerr = loadstring(body)
+		if not fn then setStatus("bad pixel data") return end
+		task.spawn(function()
+			local ok2, rerr = pcall(fn)
+			if not ok2 or not (getgenv().__imgdata and getgenv().__imgdata.px) then setStatus("bad pixel data") return end
+			Image.armed = true
+			Image.previewOn = false
+			local d = getgenv().__imgdata
+			setStatus(("loaded %dx%d (%d px) — click a wall to place"):format(d.w, d.h, d.n))
+			if onDone then pcall(onDone) end
+		end)
+	end)
+end
+
+-- click-to-place: left click while armed -> paint HERE
+UIS.InputBegan:Connect(function(io, gpe)
+	if gpe then return end
+	if not Image.armed then return end
+	if io.UserInputType ~= Enum.UserInputType.MouseButton1 then return end
+	local f = Image.frame
+	Image.armed = false
+	if Image.part then Image.part.Transparency = 1 end
+	if not f then setStatus("no wall under cursor") return end
+	paintImage(f)
+end)
 
 --// Pattern presets ---------------------------------------------------------
 local W, K, R, B, Y =
@@ -426,15 +496,116 @@ end
 
 -- color
 section "Brush"
+local setBrushColor -- fwd-decl: swatches hook into the picker once it's built
 local swatch = new("Frame", { Size = UDim2.new(1,0,0,30), BackgroundTransparency = 1 }, scroll)
 new("UIGridLayout", { CellSize = UDim2.new(0,30,0,30), CellPadding = UDim2.new(0,6,0,6), SortOrder = Enum.SortOrder.LayoutOrder }, swatch)
 for _, c in ipairs({Color3.fromRGB(255,0,0),Color3.fromRGB(255,150,0),Color3.fromRGB(255,230,0),Color3.fromRGB(0,200,80),Color3.fromRGB(0,200,220),Color3.fromRGB(40,120,255),Color3.fromRGB(150,60,255),Color3.fromRGB(220,60,200),Color3.fromRGB(255,255,255),Color3.fromRGB(15,15,15),Color3.fromRGB(160,100,60),Color3.fromRGB(255,160,180)}) do
 	local s = new("TextButton", { BackgroundColor3 = c, BorderSizePixel = 0, Text = "", AutoButtonColor = true }, swatch)
 	corner(s, 6); new("UIStroke", { Color = TXT, Thickness = 1, Transparency = 0.7 }, s)
-	s.MouseButton1Click:Connect(function() Brush.color = c applyBrush() setStatus("color set") end)
+	s.MouseButton1Click:Connect(function() setBrushColor(c) setStatus("color set") end)
 end
-slider("Brush Size (cap 1.0)", 0.1, SIZE_CAP, function() return Brush.size end, function(v) Brush.size = v end, "%.2f")
-slider("Opacity", 0.1, 1, function() return Brush.opacity end, function(v) Brush.opacity = v end, "%.2f")
+--// Color picker (hue bar + SV square + Hex/RGB/HSV) -----------------------
+do
+	local pk = new("Frame", { Size = UDim2.new(1,0,0,168), BackgroundColor3 = BG2, BorderSizePixel = 0 }, scroll)
+	corner(pk, 6); pad(pk, 10, 8, 10, 8)
+
+	-- SV square: hue base + white->clear horizontal + clear->black vertical
+	local sv = new("Frame", { Size = UDim2.new(1,-84,0,88), BackgroundColor3 = Color3.fromHSV(Brush.h,1,1), BorderSizePixel = 0 }, pk)
+	corner(sv, 6)
+	local svWhite = new("Frame", { Size = UDim2.new(1,0,1,0), BackgroundColor3 = Color3.new(1,1,1), BorderSizePixel = 0 }, sv)
+	corner(svWhite, 6)
+	new("UIGradient", { Transparency = NumberSequence.new({NumberSequenceKeypoint.new(0,0), NumberSequenceKeypoint.new(1,1)}) }, svWhite)
+	local svBlack = new("Frame", { Size = UDim2.new(1,0,1,0), BackgroundColor3 = Color3.new(0,0,0), BorderSizePixel = 0 }, sv)
+	corner(svBlack, 6)
+	new("UIGradient", { Rotation = 90, Transparency = NumberSequence.new({NumberSequenceKeypoint.new(0,1), NumberSequenceKeypoint.new(1,0)}) }, svBlack)
+	local svDot = new("Frame", { Size = UDim2.new(0,10,0,10), AnchorPoint = Vector2.new(0.5,0.5), BackgroundColor3 = Brush.color, BorderSizePixel = 0 }, sv)
+	corner(svDot, 5); new("UIStroke", { Color = Color3.new(1,1,1), Thickness = 2 }, svDot)
+
+	-- hue bar: gradient of pure hues + marker
+	local hueRow = new("Frame", { Size = UDim2.new(1,-84,0,16), Position = UDim2.new(0,0,0,96), BackgroundColor3 = Color3.new(1,1,1), BorderSizePixel = 0 }, pk)
+	corner(hueRow, 6)
+	local hKeys = {}
+	for i = 0, 6 do hKeys[#hKeys+1] = ColorSequenceKeypoint.new(i/6, Color3.fromHSV(i/6,1,1)) end
+	new("UIGradient", { Color = ColorSequence.new(hKeys) }, hueRow)
+	local hueDot = new("Frame", { Size = UDim2.new(0,4,1,4), Position = UDim2.new(0.5,0,0.5,0), AnchorPoint = Vector2.new(0.5,0.5), BackgroundColor3 = Color3.new(1,1,1), BorderSizePixel = 0 }, hueRow)
+	corner(hueDot, 2)
+
+	-- preview swatch
+	local pv = new("Frame", { Size = UDim2.new(0,64,0,88), Position = UDim2.new(1,-64,0,0), BackgroundColor3 = Brush.color, BorderSizePixel = 0 }, pk)
+	corner(pv, 6); new("UIStroke", { Color = TXT, Thickness = 1, Transparency = 0.6 }, pv)
+
+	-- numeric fields
+	local function field(ph, pos)
+		local t = new("TextBox", { Size = UDim2.new(0,64,0,20), Position = pos, BackgroundColor3 = Color3.fromRGB(15,16,19), BorderSizePixel = 0, Text = "", PlaceholderText = ph, TextColor3 = TXT, PlaceholderColor3 = DIM, Font = Enum.Font.Code, TextSize = 10, ClearTextOnFocus = false }, pk)
+		corner(t, 5)
+		return t
+	end
+	local hexF = field("#hex", UDim2.new(1,-64,0,96))
+	local rgbF = field("r,g,b", UDim2.new(1,-64,0,120))
+	local hsvF = field("h,s,v", UDim2.new(1,-64,0,144))
+
+	local refresh
+	local function setHSV(h, s, v, src)
+		Brush.h, Brush.s, Brush.v = math.clamp(h,0,1), math.clamp(s,0,1), math.clamp(v,0,1)
+		Brush.color = Color3.fromHSV(Brush.h, Brush.s, Brush.v)
+		applyBrush()
+		refresh(src)
+	end
+	setBrushColor = setHSV and function(c)
+		local h, s, v = c:ToHSV()
+		if s > 0.01 or v > 0.01 then setHSV(h, s, v, nil) else setHSV(Brush.h, s, v, nil) end
+	end
+
+	refresh = function(skip)
+		sv.BackgroundColor3 = Color3.fromHSV(Brush.h, 1, 1)
+		svDot.Position = UDim2.new(Brush.s, 0, 1 - Brush.v, 0)
+		svDot.BackgroundColor3 = Brush.color
+		hueDot.Position = UDim2.new(Brush.h, 0, 0.5, 0)
+		pv.BackgroundColor3 = Brush.color
+		local r, g, b = math.floor(Brush.color.R*255+0.5), math.floor(Brush.color.G*255+0.5), math.floor(Brush.color.B*255+0.5)
+		if skip ~= hexF then hexF.Text = ("#%02x%02x%02x"):format(r,g,b) end
+		if skip ~= rgbF then rgbF.Text = ("%d,%d,%d"):format(r,g,b) end
+		if skip ~= hsvF then hsvF.Text = ("%.0f,%.0f,%.0f"):format(Brush.h*360, Brush.s*100, Brush.v*100) end
+	end
+
+	-- drag helpers
+	local function dragOn(frame, cb)
+		local dragging = false
+		local function upd(io)
+			local x = math.clamp((io.Position.X - frame.AbsolutePosition.X) / math.max(frame.AbsoluteSize.X, 1), 0, 1)
+			local y = math.clamp((io.Position.Y - frame.AbsolutePosition.Y) / math.max(frame.AbsoluteSize.Y, 1), 0, 1)
+			cb(x, y)
+		end
+		frame.InputBegan:Connect(function(io) if io.UserInputType == Enum.UserInputType.MouseButton1 then dragging = true upd(io) end end)
+		frame.InputChanged:Connect(function(io) if dragging and io.UserInputType == Enum.UserInputType.MouseMovement then upd(io) end end)
+		UIS.InputEnded:Connect(function(io) if io.UserInputType == Enum.UserInputType.MouseButton1 then dragging = false end end)
+	end
+	dragOn(sv, function(x, y) setHSV(Brush.h, x, 1 - y) end)
+	dragOn(hueRow, function(x) setHSV(x, Brush.s, Brush.v) end)
+
+	hexF.FocusLost:Connect(function(enter)
+		if not enter then return end
+		local t = hexF.Text:gsub("#",""):gsub("^%s+",""):gsub("%s+$","")
+		if t:match("^%x%x%x%x%x%x$") then
+			local c = Color3.fromRGB(tonumber(t:sub(1,2),16), tonumber(t:sub(3,4),16), tonumber(t:sub(5,6),16))
+			setBrushColor(c)
+		else refresh() end
+	end)
+	rgbF.FocusLost:Connect(function(enter)
+		if not enter then return end
+		local r, g, b = rgbF.Text:match("(%d+)%s*,%s*(%d+)%s*,%s*(%d+)")
+		if r then setBrushColor(Color3.fromRGB(math.clamp(tonumber(r),0,255), math.clamp(tonumber(g),0,255), math.clamp(tonumber(b),0,255))) else refresh() end
+	end)
+	hsvF.FocusLost:Connect(function(enter)
+		if not enter then return end
+		local h, s, v = hsvF.Text:match("([%d%.]+)%s*,%s*([%d%.]+)%s*,%s*([%d%.]+)")
+		if h then setHSV((tonumber(h)%360)/360, tonumber(s)/100, tonumber(v)/100) else refresh() end
+	end)
+	refresh()
+end
+
+slider("Brush Size (cap 1.2)", 0.05, SIZE_CAP, function() return Brush.size end, function(v) Brush.size = v end, "%.2f")
+slider("Opacity", 0.05, 1, function() return Brush.opacity end, function(v) Brush.opacity = v end, "%.2f")
 slider("Layer", 1, 10, function() return Brush.layer end, function(v) Brush.layer = math.floor(v+0.5) end, "%d")
 btn("Shape: Octagon", function(b)
 	local order = { "Octagon", "Square", "Triangle" }
@@ -457,22 +628,34 @@ btn("◈ Spray Spam", function() runPaintJob(buildSpraySpam(150, 2.5, 2.5)) end)
 
 -- image paint
 section "Image Paint (URL -> wall)"
-local urlBox = new("TextBox", { Size = UDim2.new(1,0,0,30), BackgroundColor3 = Color3.fromRGB(15,16,19), BorderSizePixel = 0, PlaceholderText = "paste image URL here, then tell ENI to paint it", Text = "", TextColor3 = TXT, PlaceholderColor3 = DIM, Font = Enum.Font.Gotham, TextSize = 11, ClearTextOnFocus = false, TextXAlignment = Enum.TextXAlignment.Left }, scroll)
+local urlBox = new("TextBox", { Size = UDim2.new(1,0,0,30), BackgroundColor3 = Color3.fromRGB(15,16,19), BorderSizePixel = 0, PlaceholderText = "paste image URL here, press 🖼 to draw", Text = "", TextColor3 = TXT, PlaceholderColor3 = DIM, Font = Enum.Font.Gotham, TextSize = 11, ClearTextOnFocus = false, TextXAlignment = Enum.TextXAlignment.Left }, scroll)
 corner(urlBox, 6); pad(urlBox, 10, 0, 10, 0)
 Image.urlBox = urlBox
 urlBox.FocusLost:Connect(function(enter)
 	if enter and urlBox.Text:match("^https?://") then
 		getgenv().__imgurl = urlBox.Text
-		setStatus("URL saved — tell ENI to 'paint it'")
 		print("[SPRAYHUB-URL] " .. urlBox.Text)
 	end
 end)
 slider("px size (studs)", 0.2, 1.2, function() return Image.cell end, function(v) Image.cell = v end, "%.2f")
+slider("img resolution (px wide)", 16, 80, function() return Image.maxW end, function(v) Image.maxW = math.floor(v+0.5) Image.maxH = math.floor(v*0.9+0.5) end, "%d")
+btn("🖼 Load URL & Place (click a wall)", function()
+	local url = urlBox.Text:match("^https?://") and urlBox.Text or getgenv().__imgurl
+	if not url then setStatus("paste an image URL first") return end
+	getgenv().__imgurl = url
+	loadImageFromUrl(url)
+end)
 btn("👁 Toggle Cursor Preview", function(b)
 	Image.previewOn = not Image.previewOn
+	Image.armed = false
 	setStatus(Image.previewOn and "preview ON — move mouse on a wall" or "preview OFF")
 end)
-btn("🖼 Paint Image Here", function() paintImage() end)
+btn("🎯 Place Loaded Image Here", function()
+	if not (getgenv().__imgdata and getgenv().__imgdata.px) then setStatus("no image loaded") return end
+	Image.armed = true
+	Image.previewOn = false
+	setStatus("click a wall to place")
+end)
 
 -- tools
 section "Tools"

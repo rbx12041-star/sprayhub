@@ -6,7 +6,15 @@ Legend: 🟥 blocking · 🟨 annoying · 🟩 known-limitation (not fixable)
 
 ---
 
-## 🟥 #1 — Multi-color batches persist only `+1` (THE image-painter blocker)
+## ✅ #1 — Multi-color batches persist only `+1` — FIXED 2026-08-11
+
+**Cause (confirmed live):** the server persists **ONE color per stroke** — a mixed-color batch in a single flush dedups to exactly one blob.
+
+**Fix (shipped in v4):** `runPaintJob` now groups blobs **globally by color** (first-seen order — NOT contiguous runs, which would shard interleaved images into a stroke per pixel) and paints each color as its OWN stroke: `Stroke` bump + `LogUndoRedoEvent` + `cachePaint` those blobs only + fresh `WarnModule()` keys + `sendToServer`, waiting one `PaintUpdateRate` between color runs.
+
+**Verification (2026-08-11, private server):** 4-color×4 test 16/16 ✓ · hub Checkerboard (18 white + 18 black interleaved) 36/36 ✓ · Roblox logo 40×36 image 1116/1116 px across 145 color runs ✓. Test script: `C:\Users\Sebii\sprayhub_colortest.luau` (flaky on first flush in round 1 — first color-run dropped once; watch for it).
+
+<details><summary>Original report (kept for history)</summary>
 
 **Symptom.** A batch of blobs with **mixed colors** yields exactly `+1` on the lifetime `PaintCount`, no matter the blob count, location, spacing, or offset — repeatedly reproduced via in-session execution. A **single-color** batch of the same size, same wall, same code path persists **fully**.
 
@@ -34,6 +42,8 @@ Legend: 🟥 blocking · 🟨 annoying · 🟩 known-limitation (not fixable)
 - Try the `Remotes.Paint.MakePaintNoCooldown` RemoteFunction (uninvestigated).
 - Paint image on a **fresh/empty layer** (layer 2+) to test if a per-layer occupancy/cap contributes.
 - Read `MakePaint:InvokeServer` return value / `sendToServer` return on a mixed batch for a server error string.
+
+</details>
 
 ---
 
