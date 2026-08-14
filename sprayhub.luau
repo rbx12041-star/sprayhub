@@ -142,10 +142,10 @@ local function blobCFrame(f, u, v)
 end
 
 -- set EVERY attr right before the make (beats the game's periodic PaintSettings reset)
-local function paintBlob(cf, color)
+local function paintBlob(cf, color, shape, size)
 	PS:SetAttribute("Color", color)
-	PS:SetAttribute("Size", math.clamp(Brush.size, 0.05, SIZE_CAP))
-	PS:SetAttribute("BrushShape", Brush.shape)
+	PS:SetAttribute("Size", math.clamp(size or Brush.size, 0.05, SIZE_CAP))
+	PS:SetAttribute("BrushShape", shape or Brush.shape)
 	PS:SetAttribute("Layer", Brush.layer)
 	PS:SetAttribute("Opacity", Brush.opacity)
 	PS:SetAttribute("NeonEnabled", Brush.neon)
@@ -184,7 +184,7 @@ local function runPaintJob(blobList, opts)
 			local n = 0
 			for _, b in ipairs(run.blobs) do
 				if Hub.stopped then break end
-				if b.cf and paintBlob(b.cf, b.color or currentColor()) then made = made + 1 n = n + 1 Hub.painted = Hub.painted + 1 end
+				if b.cf and paintBlob(b.cf, b.color or currentColor(), b.shape, b.size) then made = made + 1 n = n + 1 Hub.painted = Hub.painted + 1 end
 				if n % batch == 0 then flush() task.wait(FLUSH_RATE) end
 				task.wait()
 			end
@@ -208,7 +208,8 @@ end))
 coroutine.resume(Hub.threads[#Hub.threads])
 
 --// Grid builders -----------------------------------------------------------
-local function gridStep() return math.max(Brush.size * DIST_MULT, MIN_SPACING, 0.12) end
+local FILL_DIST_MULT = 1.0 -- blob centers one blob-width apart = edge-to-edge tiling
+local function gridStep() return math.max(Brush.size * FILL_DIST_MULT, MIN_SPACING) end
 local function buildFill(halfW, halfH)
 	local f = aimFrame(); if not f then setStatus("look at a wall first") return {} end
 	halfW = halfW or 2; halfH = halfH or 2
@@ -271,8 +272,129 @@ local function buildSpraySpam(n, maxW, maxH)
 	return list
 end
 
+--// Text painter: 5x7 bitmap font -> __imgdata (reuses the whole image pipeline)
+-- Each glyph is 7 rows of "#"/"."; width is auto (max row len). Unknown chars skip.
+local Image -- fwd-decl: defined in the image-paint section below
+local FONT = {
+	A = {".###.","#...#","#...#","#####","#...#","#...#","#...#"},
+	B = {"####.","#...#","#...#","####.","#...#","#...#","####."},
+	C = {".####","#....","#....","#....","#....","#....",".####"},
+	D = {"####.","#...#","#...#","#...#","#...#","#...#","####."},
+	E = {"#####","#....","#....","####.","#....","#....","#####"},
+	F = {"#####","#....","#....","####.","#....","#....","#...."},
+	G = {".####","#....","#....","#.###","#...#","#...#",".###."},
+	H = {"#...#","#...#","#...#","#####","#...#","#...#","#...#"},
+	I = {"###",".#.",".#.",".#.",".#.",".#.","###"},
+	J = {"..###","...#.","...#.","...#.","...#.","#..#.",".##.."},
+	K = {"#...#","#..#.","#.#..","##...","#.#..","#..#.","#...#"},
+	L = {"#....","#....","#....","#....","#....","#....","#####"},
+	M = {"#...#","##.##","#.#.#","#.#.#","#...#","#...#","#...#"},
+	N = {"#...#","##..#","##..#","#.#.#","#..##","#..##","#...#"},
+	O = {".###.","#...#","#...#","#...#","#...#","#...#",".###."},
+	P = {"####.","#...#","#...#","####.","#....","#....","#...."},
+	Q = {".###.","#...#","#...#","#...#","#.#.#","#..#.",".##.#"},
+	R = {"####.","#...#","#...#","####.","#.#..","#..#.","#...#"},
+	S = {".####","#....","#....",".###.","....#","....#","####."},
+	T = {"#####","..#..","..#..","..#..","..#..","..#..","..#.."},
+	U = {"#...#","#...#","#...#","#...#","#...#","#...#",".###."},
+	V = {"#...#","#...#","#...#","#...#","#...#",".#.#.","..#.."},
+	W = {"#...#","#...#","#...#","#.#.#","#.#.#","##.##","#...#"},
+	X = {"#...#","#...#",".#.#.","..#..",".#.#.","#...#","#...#"},
+	Y = {"#...#","#...#",".#.#.","..#..","..#..","..#..","..#.."},
+	Z = {"#####","....#","...#.","..#..",".#...","#....","#####"},
+	["0"] = {".###.","#..##","#.#.#","#.#.#","##..#","#...#",".###."},
+	["1"] = {"..#..",".##..","..#..","..#..","..#..","..#..",".###."},
+	["2"] = {".###.","#...#","....#","...#.","..#..",".#...","#####"},
+	["3"] = {"####.","....#","....#",".###.","....#","....#","####."},
+	["4"] = {"...#.","..##.",".#.#.","#..#.","#####","...#.","...#."},
+	["5"] = {"#####","#....","####.","....#","....#","#...#",".###."},
+	["6"] = {".###.","#....","#....","####.","#...#","#...#",".###."},
+	["7"] = {"#####","....#","...#.","..#..",".#...",".#...",".#..."},
+	["8"] = {".###.","#...#","#...#",".###.","#...#","#...#",".###."},
+	["9"] = {".###.","#...#","#...#",".####","....#","....#",".###."},
+	["!"] = {"..#..","..#..","..#..","..#..","..#..",".....","..#.."},
+	["?"] = {".###.","#...#","....#","..##.","..#..",".....","..#.."},
+	["."] = {".....",".....",".....",".....",".....","..##.","..##."},
+	[","] = {".....",".....",".....",".....","..##.","..##.",".#..."},
+	["'"] = {"..#..","..#..","..#..",".....",".....",".....","....."},
+	['"'] = {".#.#.",".#.#.",".#.#.",".....",".....",".....","....."},
+	[":"] = {".....","..##.","..##.",".....","..##.","..##.","....."},
+	[";"] = {".....","..##.","..##.",".....","..##.","..##.",".#..."},
+	["-"] = {".....",".....",".....","#####",".....",".....","....."},
+	["_"] = {".....",".....",".....",".....",".....",".....","#####"},
+	["+"] = {".....","..#..","..#..","#####","..#..","..#..","....."},
+	["="] = {".....",".....","#####",".....","#####",".....","....."},
+	["("] = {"...#.","..#..",".#...",".#...",".#...","..#..","...#."},
+	[")"] = {".#...","..#..","...#.","...#.","...#.","..#..",".#..."},
+	["/"] = {"....#","....#","...#.","..#..",".#...","#....","#...."},
+	["*"] = {".....",".#.#.","..#..","#####","..#..",".#.#.","....."},
+	["<"] = {"...#.","..#..",".#...","#....",".#...","..#..","...#."},
+	[">"] = {".#...","..#..","...#.","....#","...#.","..#..",".#..."},
+	["<3"] = {".#.#.","#####","#####","#####",".###.","..#..","....."}, -- heart, type <3
+}
+local GLYPH_H, LETTER_GAP, LINE_GAP, SPACE_W = 7, 1, 2, 3
+
+-- text -> {w,h,n,px} in the imgserver/img2grid format (px = {x, y, packedRGB, alpha})
+-- returns data, skippedCount (chars with no glyph)
+local function textToImage(text, color)
+	local r = math.floor(color.R * 255 + 0.5)
+	local g = math.floor(color.G * 255 + 0.5)
+	local b = math.floor(color.B * 255 + 0.5)
+	local packed = r * 65536 + g * 256 + b
+	local px, skipped = {}, 0
+	local totalW, yOff = 0, 0
+	local lineWidths = {}
+	for line in (text .. "\n"):gmatch("(.-)\n") do
+		local x, lineW = 0, 0
+		local i = 1
+		while i <= #line do
+			-- multi-char glyph tokens first (<3)
+			local tok = line:sub(i, i + 1)
+			local glyph
+			if FONT[tok] then glyph = FONT[tok] i = i + 2
+			else
+				local c = line:sub(i, i)
+				i = i + 1
+				if c == " " then x = x + SPACE_W + LETTER_GAP continue end
+				glyph = FONT[c] or FONT[c:upper()]
+				if not glyph then skipped = skipped + 1 continue end
+			end
+			local gw = 0
+			for _, row in ipairs(glyph) do gw = math.max(gw, #row) end
+			for ry, row in ipairs(glyph) do
+				for rx = 1, #row do
+					if row:sub(rx, rx) == "#" then
+						table.insert(px, { x + rx - 1, yOff + ry - 1, packed, 255 })
+					end
+				end
+			end
+			x = x + gw + LETTER_GAP
+			lineW = x
+		end
+		lineW = math.max(lineW - LETTER_GAP, 0) -- trailing gap doesn't count
+		table.insert(lineWidths, lineW)
+		totalW = math.max(totalW, lineW)
+		yOff = yOff + GLYPH_H + LINE_GAP
+	end
+	local totalH = yOff - LINE_GAP
+	return { w = math.max(totalW, 1), h = math.max(totalH, 1), n = #px, px = px, lineWidths = lineWidths }, skipped
+end
+
+-- turn text into __imgdata and arm click-to-place (same flow as URL images)
+local function armText(text, color)
+	if not text or text == "" then setStatus("type some text first") return false end
+	local data, skipped = textToImage(text, color or Brush.color)
+	if data.n == 0 then setStatus("no paintable glyphs in that text") return false end
+	getgenv().__imgdata = data
+	Image.armed = true
+	Image.previewOn = false
+	setStatus(("text armed: %d px (%dx%d)%s — click a wall"):format(
+		data.n, data.w, data.h, skipped > 0 and (", skipped " .. skipped .. " chars") or ""))
+	return true
+end
+
 --// Image paint: cursor-following preview + pixel-grid painting -------------
-local Image = { enabled = false, previewOn = false, armed = false, cell = 0.6, frame = nil, part = nil, urlBox = nil, culled = nil, maxW = 40, maxH = 36 }
+Image = { enabled = false, previewOn = false, armed = false, cell = 0.6, frame = nil, part = nil, urlBox = nil, culled = nil, maxW = 40, maxH = 36, overlap = 1.0 } -- size = cell*overlap; 1.0 = edge-to-edge tiles
 
 -- orthonormal wall frame from a ray hit (right/up on the surface)
 local function frameFromHit(hit)
@@ -350,7 +472,7 @@ local function buildImage(f)
 		local hit = workspace:Raycast(target + f.normal * 0.6, -f.normal * 1.6, params)
 		if hit and hit.Instance:HasTag("PaintRaycast") then
 			if not root or (hit.Position - root).Magnitude <= MAX_DIST * 0.97 then
-				table.insert(list, { cf = faceCFrame(hit.Position, hit.Normal), color = Color3.fromRGB(r, g, b) })
+				table.insert(list, { cf = faceCFrame(hit.Position, hit.Normal), color = Color3.fromRGB(r, g, b), shape = "Square", size = math.min(cell * Image.overlap, SIZE_CAP) })
 			else
 				tooFar += 1
 			end
@@ -375,6 +497,22 @@ local function paintImage(f)
 		end)
 	end
 end
+
+-- mouse wheel: resize preview AND sink the event so the game camera doesn't zoom
+local CAS = game:GetService("ContextActionService")
+local function setWheelSink(on)
+	if on then
+		CAS:BindActionAtPriority("SprayHubWheel", function(_, is, io)
+			if io.UserInputType == Enum.UserInputType.MouseWheel and (Image.armed or Image.previewOn) then
+				return Enum.ContextActionResult.Sink
+			end
+			return Enum.ContextActionResult.Pass
+		end, false, Enum.ContextActionPriority.High.Value + 1, Enum.UserInputType.MouseWheel)
+	else
+		pcall(function() CAS:UnbindAction("SprayHubWheel") end)
+	end
+end
+setWheelSink(true)
 
 -- one-click: load URL -> arm placement -> click wall -> auto-draw
 local function loadImageFromUrl(url, onDone)
@@ -411,6 +549,17 @@ UIS.InputBegan:Connect(function(io, gpe)
 	if Image.part then Image.part.Transparency = 1 end
 	if not f then setStatus("no wall under cursor") return end
 	paintImage(f)
+end)
+
+-- scroll wheel resizes the preview (px size) while armed/previewing — keeps source resolution
+UIS.InputChanged:Connect(function(io, gpe)
+	if gpe then return end
+	if io.UserInputType ~= Enum.UserInputType.MouseWheel then return end
+	if not (Image.armed or Image.previewOn) then return end
+	if not (getgenv().__imgdata and getgenv().__imgdata.px) then return end
+	Image.cell = math.clamp(Image.cell + io.Position.Z * 0.05, 0.15, 1.2)
+	local d = getgenv().__imgdata
+	setStatus(("preview %d px (%.1fx%.1f studs) — wheel=size, click=draw"):format(d.n, d.w * Image.cell, d.h * Image.cell))
 end)
 
 --// Pattern presets ---------------------------------------------------------
@@ -638,7 +787,7 @@ urlBox.FocusLost:Connect(function(enter)
 	end
 end)
 slider("px size (studs)", 0.2, 1.2, function() return Image.cell end, function(v) Image.cell = v end, "%.2f")
-slider("img resolution (px wide)", 16, 80, function() return Image.maxW end, function(v) Image.maxW = math.floor(v+0.5) Image.maxH = math.floor(v*0.9+0.5) end, "%d")
+slider("img resolution (px wide)", 16, 128, function() return Image.maxW end, function(v) Image.maxW = math.floor(v+0.5) Image.maxH = math.floor(v*0.9+0.5) end, "%d")
 btn("🖼 Load URL & Place (click a wall)", function()
 	local url = urlBox.Text:match("^https?://") and urlBox.Text or getgenv().__imgurl
 	if not url then setStatus("paste an image URL first") return end
@@ -655,6 +804,14 @@ btn("🎯 Place Loaded Image Here", function()
 	Image.armed = true
 	Image.previewOn = false
 	setStatus("click a wall to place")
+end)
+
+-- text paint
+section "Text Paint (bitmap font)"
+local textBox = new("TextBox", { Size = UDim2.new(1,0,0,44), BackgroundColor3 = Color3.fromRGB(15,16,19), BorderSizePixel = 0, PlaceholderText = "type text here (A-Z 0-9, <3 = heart; Enter = new line)", Text = "", TextColor3 = TXT, PlaceholderColor3 = DIM, Font = Enum.Font.Gotham, TextSize = 11, ClearTextOnFocus = false, MultiLine = true, TextWrapped = true, TextXAlignment = Enum.TextXAlignment.Left, TextYAlignment = Enum.TextYAlignment.Top }, scroll)
+corner(textBox, 6); pad(textBox, 10, 6, 10, 6)
+btn("🔤 Arm Text — click a wall (uses brush color)", function()
+	armText(textBox.Text, Brush.color)
 end)
 
 -- tools
@@ -687,6 +844,9 @@ Hub.presets = Presets
 Hub.presetOrder = PresetOrder
 Hub.image = Image
 Hub.paintImage = paintImage
+Hub.textToImage = textToImage
+Hub.armText = armText
+Hub.font = FONT
 Hub.setPreview = function(v) Image.previewOn = v end
 applyBrush()
 setStatus("v2 ready — size cap " .. SIZE_CAP .. ", effects need gamepass")
