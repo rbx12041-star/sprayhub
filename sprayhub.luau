@@ -176,6 +176,13 @@ local function runPaintJob(blobList, opts)
 		table.insert(run.blobs, b)
 	end
 	local t = coroutine.create(function()
+		-- warmup: the server's FIRST flush of a session is reliably dropped
+		-- (observed 2026-08-11 + 2026-08-14: first batch vanishes, rest persist).
+		-- Send an empty flush to wake it before any real paint.
+		if Hub.painted == 0 and not opts.noWarmup then
+			flush()
+			task.wait(FLUSH_RATE)
+		end
 		local made = 0
 		for ri, run in ipairs(runs) do
 			if Hub.stopped then break end
