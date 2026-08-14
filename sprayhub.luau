@@ -546,17 +546,23 @@ local function loadImageFromUrl(url, onDone)
 	end)
 end
 
--- click-to-place: left click while armed -> paint HERE
-UIS.InputBegan:Connect(function(io, gpe)
-	if gpe then return end
-	if not Image.armed then return end
-	if io.UserInputType ~= Enum.UserInputType.MouseButton1 then return end
+-- click-to-place: left click while armed -> paint HERE.
+-- Bound via CAS at High+1 and SUNK so the game's own click-paint never sees it
+-- (raw UIS.InputBegan can't stop the game from also painting one blob).
+local function placeAtCursor()
 	local f = Image.frame
 	Image.armed = false
 	if Image.part then Image.part.Transparency = 1 end
 	if not f then setStatus("no wall under cursor") return end
 	paintImage(f)
-end)
+end
+CAS:BindActionAtPriority("SprayHubPlace", function(_, is, io)
+	if is == Enum.UserInputState.Begin and Image.armed then
+		placeAtCursor()
+		return Enum.ContextActionResult.Sink
+	end
+	return Enum.ContextActionResult.Pass
+end, false, Enum.ContextActionPriority.High.Value + 1, Enum.UserInputType.MouseButton1)
 
 -- scroll wheel resizes the preview (px size) while armed/previewing — keeps source resolution
 UIS.InputChanged:Connect(function(io, gpe)
