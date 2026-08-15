@@ -934,13 +934,11 @@ local function slider(label, min, max, get, set, fmt)
 	bar.InputBegan:Connect(function(io)
 		if io.UserInputType == Enum.UserInputType.MouseButton1 then dragging = true setFrom(io) end
 	end)
-	bar.InputChanged:Connect(function(io)
+	-- track mouse GLOBALLY while held — a ScrollingFrame can swallow the
+	-- bar's own InputChanged once the cursor leaves the 10px bar area
+	UIS.InputChanged:Connect(function(io)
 		if dragging and io.UserInputType == Enum.UserInputType.MouseMovement then setFrom(io) end
 	end)
-	bar.InputEnded:Connect(function(io)
-		if io.UserInputType == Enum.UserInputType.MouseButton1 then dragging = false end
-	end)
-	-- backstop: release off-bar still ends the drag
 	UIS.InputEnded:Connect(function(io)
 		if io.UserInputType == Enum.UserInputType.MouseButton1 then dragging = false end
 	end)
