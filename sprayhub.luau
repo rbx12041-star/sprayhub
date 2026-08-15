@@ -49,7 +49,7 @@ local GP = LP:FindFirstChild("GamePasses")
 local function owns(attr) return GP and GP:GetAttribute(attr) == true end
 
 --// State -------------------------------------------------------------------
-local Hub = { gui = nil, threads = {}, stopped = false, painted = 0, enforce = true, human = false }
+local Hub = { gui = nil, threads = {}, stopped = false, painted = 0, enforce = true, human = false, turbo = false }
 getgenv().__SprayHub = Hub
 
 function Hub.stopAll()
@@ -183,10 +183,13 @@ local function runPaintJob(blobList, opts)
 			flush()
 			task.wait(FLUSH_RATE)
 		end
+		-- turbo mode: whole color run per flush, no per-blob delay, exact cadence.
+		-- human mode still takes precedence if both are on.
+		if Hub.turbo and not Hub.human then batch = math.max(batch, 500) end
 		-- human mode: smaller batches + jittered pacing (mitigates server spam-flagging)
 		if Hub.human then batch = math.min(batch, 12) end
 		local function blobWait()
-			if Hub.human then task.wait(0.02 + math.random() * 0.05) else task.wait() end
+			if Hub.human then task.wait(0.02 + math.random() * 0.05) elseif not Hub.turbo then task.wait() end
 		end
 		local function flushWait()
 			task.wait(Hub.human and FLUSH_RATE * (1.5 + math.random()) or FLUSH_RATE)
@@ -782,12 +785,23 @@ local function paintImage(f)
 	end
 end
 
--- mouse wheel: resize preview AND sink the event so the game camera doesn't zoom
+-- mouse wheel: resize preview AND sink the event so the game camera doesn't zoom.
+-- Resize runs INSIDE the sinking binding — a separate UIS.InputChanged handler
+-- sees gpe=true for sunk input and never fires (that was the v4.4 resize bug).
+-- Shift+wheel passes through so the camera can still zoom while armed.
 local CAS = game:GetService("ContextActionService")
+local function hubWheelResize(dz)
+	if not (getgenv().__imgdata and getgenv().__imgdata.px) then return end
+	Image.cell = math.clamp(Image.cell + dz * 0.05, 0.15, 1.2)
+	local d = getgenv().__imgdata
+	setStatus(("preview %d px (%.1fx%.1f studs) — wheel=size, shift+wheel=cam zoom, click=draw"):format(d.n, d.w * Image.cell, d.h * Image.cell))
+end
 local function setWheelSink(on)
 	if on then
 		CAS:BindActionAtPriority("SprayHubWheel", function(_, is, io)
 			if io.UserInputType == Enum.UserInputType.MouseWheel and (Image.armed or Image.previewOn) then
+				if UIS:IsKeyDown(Enum.KeyCode.LeftShift) then return Enum.ContextActionResult.Pass end
+				hubWheelResize(io.Position.Z)
 				return Enum.ContextActionResult.Sink
 			end
 			return Enum.ContextActionResult.Pass
@@ -839,16 +853,7 @@ CAS:BindActionAtPriority("SprayHubPlace", function(_, is, io)
 	return Enum.ContextActionResult.Pass
 end, false, Enum.ContextActionPriority.High.Value + 1, Enum.UserInputType.MouseButton1)
 
--- scroll wheel resizes the preview (px size) while armed/previewing — keeps source resolution
-UIS.InputChanged:Connect(function(io, gpe)
-	if gpe then return end
-	if io.UserInputType ~= Enum.UserInputType.MouseWheel then return end
-	if not (Image.armed or Image.previewOn) then return end
-	if not (getgenv().__imgdata and getgenv().__imgdata.px) then return end
-	Image.cell = math.clamp(Image.cell + io.Position.Z * 0.05, 0.15, 1.2)
-	local d = getgenv().__imgdata
-	setStatus(("preview %d px (%.1fx%.1f studs) — wheel=size, click=draw"):format(d.n, d.w * Image.cell, d.h * Image.cell))
-end)
+-- (resize now lives in the SprayHubWheel CAS binding above)
 
 --// Pattern presets ---------------------------------------------------------
 local W, K, R, B, Y =
@@ -1066,6 +1071,7 @@ btn("Shape: Octagon", function(b)
 end)
 toggle("Enforce Brush (manual paint)", function() return Hub.enforce end, function(v) Hub.enforce = v end)
 toggle("Human Mode (safer, slower)", function() return Hub.human end, function(v) Hub.human = v end)
+toggle("Turbo (max speed, watch for flags)", function() return Hub.turbo end, function(v) Hub.turbo = v end)
 effectToggle("Neon", "NeonPaint", function() return Brush.neon end, function(v) Brush.neon = v end)
 effectToggle("Chrome", "ChromePaint", function() return Brush.chrome end, function(v) Brush.chrome = v end)
 effectToggle("Rainbow", "RainbowPaint", function() return Brush.rainbow end, function(v) Brush.rainbow = v end)
