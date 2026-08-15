@@ -926,7 +926,24 @@ local function slider(label, min, max, get, set, fmt)
 	local fill = new("Frame", { BackgroundColor3 = ACC, BorderSizePixel = 0 }, bar)
 	corner(fill, 5)
 	local function refresh() local v = get() local a = math.clamp((v-min)/(max-min),0,1) fill.Size = UDim2.new(a,0,1,0) val.Text = (fmt or "%.2f"):format(v) end
-	bar.InputBegan:Connect(function(io) if io.UserInputType == Enum.UserInputType.MouseButton1 then local a = math.clamp((io.Position.X - bar.AbsolutePosition.X)/math.max(bar.AbsoluteSize.X,1),0,1) set(min + (max-min)*a) refresh() applyBrush() end end)
+	local dragging = false
+	local function setFrom(io)
+		local a = math.clamp((io.Position.X - bar.AbsolutePosition.X)/math.max(bar.AbsoluteSize.X,1),0,1)
+		set(min + (max-min)*a) refresh() applyBrush()
+	end
+	bar.InputBegan:Connect(function(io)
+		if io.UserInputType == Enum.UserInputType.MouseButton1 then dragging = true setFrom(io) end
+	end)
+	bar.InputChanged:Connect(function(io)
+		if dragging and io.UserInputType == Enum.UserInputType.MouseMovement then setFrom(io) end
+	end)
+	bar.InputEnded:Connect(function(io)
+		if io.UserInputType == Enum.UserInputType.MouseButton1 then dragging = false end
+	end)
+	-- backstop: release off-bar still ends the drag
+	UIS.InputEnded:Connect(function(io)
+		if io.UserInputType == Enum.UserInputType.MouseButton1 then dragging = false end
+	end)
 	refresh()
 	return frame
 end
