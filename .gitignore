@@ -1,7 +1,1 @@
-node_modules/
-*.log
-imgdata.luau
-test4x4.png
-*.png.tmp
-.DS_Store
-Thumbs.db
+lune.exe
