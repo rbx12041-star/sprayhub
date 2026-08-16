@@ -5,7 +5,7 @@ All notable changes, newest first. Format: version + date + what changed.
 ## v4.5 — 2026-08-15
 - **Slider dragging fixed.** Sliders only set on mouse-press; added global mouse tracking while held (ScrollingFrame was swallowing the bar's own InputChanged).
 - **Wheel resize fixed.** Wheel was sunk for the camera but resize lived in a `gpe`-gated UIS handler that never fired for sunk input; resize now runs inside the sink binding. **Shift+wheel** passes through to zoom the camera while armed.
-- **Turbo mode added.** Toggle: 500-blob batches per flush, no per-blob delay, exact `PaintUpdateRate` cadence. Human Mode still wins if both are on. Untested against the server's per-invoke blob cap — watch for dropped blobs on first use.
+- **Turbo mode: added then REMOVED same-day.** 500-blob batches got server-delete (rate threshold like the old flood problem). Batch 40 + per-blob `task.wait()` is the safe ceiling — do not re-attempt bigger per-flush pushes without a probing plan.
 
 ## v4.4 — 2026-08-14
 - **Self-contained:** embedded pure-Luau PNG decoder (verified 10/10 pixel-exact vs img2grid.js); URL image painting no longer needs localhost imgserver. PNG URLs only, 8-bit, non-interlaced.

@@ -49,7 +49,7 @@ local GP = LP:FindFirstChild("GamePasses")
 local function owns(attr) return GP and GP:GetAttribute(attr) == true end
 
 --// State -------------------------------------------------------------------
-local Hub = { gui = nil, threads = {}, stopped = false, painted = 0, enforce = true, human = false, turbo = false }
+local Hub = { gui = nil, threads = {}, stopped = false, painted = 0, enforce = true, human = false }
 getgenv().__SprayHub = Hub
 
 function Hub.stopAll()
@@ -183,13 +183,10 @@ local function runPaintJob(blobList, opts)
 			flush()
 			task.wait(FLUSH_RATE)
 		end
-		-- turbo mode: whole color run per flush, no per-blob delay, exact cadence.
-		-- human mode still takes precedence if both are on.
-		if Hub.turbo and not Hub.human then batch = math.max(batch, 500) end
 		-- human mode: smaller batches + jittered pacing (mitigates server spam-flagging)
 		if Hub.human then batch = math.min(batch, 12) end
 		local function blobWait()
-			if Hub.human then task.wait(0.02 + math.random() * 0.05) elseif not Hub.turbo then task.wait() end
+			if Hub.human then task.wait(0.02 + math.random() * 0.05) else task.wait() end
 		end
 		local function flushWait()
 			task.wait(Hub.human and FLUSH_RATE * (1.5 + math.random()) or FLUSH_RATE)
@@ -1071,7 +1068,6 @@ btn("Shape: Octagon", function(b)
 end)
 toggle("Enforce Brush (manual paint)", function() return Hub.enforce end, function(v) Hub.enforce = v end)
 toggle("Human Mode (safer, slower)", function() return Hub.human end, function(v) Hub.human = v end)
-toggle("Turbo (max speed, watch for flags)", function() return Hub.turbo end, function(v) Hub.turbo = v end)
 effectToggle("Neon", "NeonPaint", function() return Brush.neon end, function(v) Brush.neon = v end)
 effectToggle("Chrome", "ChromePaint", function() return Brush.chrome end, function(v) Brush.chrome = v end)
 effectToggle("Rainbow", "RainbowPaint", function() return Brush.rainbow end, function(v) Brush.rainbow = v end)
