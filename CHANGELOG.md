@@ -2,6 +2,10 @@
 
 All notable changes, newest first. Format: version + date + what changed.
 
+## v4.6 — 2026-08-16
+- **VIM Input mode added (kick-safest).** Instead of calling `MakePaint`/`cachePaint`/`flush` itself, the hub auto-equips the spray tool and drives the game's OWN PaintGui paint loop with synthetic `VirtualInputManager` input: press/drag/release M1 along the planned path, one stroke per color run. Every WarnModule key, flush cadence, MinSpacing clamp and stroke/undo log is then game-generated = looks exactly like a human holding M1. Slower (real game paint rate) and only paints what's on-screen.
+- Cursor-speed pacing (~650 px/s, Human Mode adds jitter), distance-based pen lifts between disjoint spots (letters etc. re-press like a human), one-time coordinate calibration against `UIS:GetMouseLocation()`, auto pen-release on job end/error/stop so the cursor is never left "held", per-stroke brush attrs kept sticky via the enforce loop (game resets PaintSettings ~1s). Lune functional test: `test_vim.luau`.
+
 ## v4.5 — 2026-08-15
 - **Slider dragging fixed.** Sliders only set on mouse-press; added global mouse tracking while held (ScrollingFrame was swallowing the bar's own InputChanged).
 - **Wheel resize fixed.** Wheel was sunk for the camera but resize lived in a `gpe`-gated UIS handler that never fired for sunk input; resize now runs inside the sink binding. **Shift+wheel** passes through to zoom the camera while armed.

@@ -26,6 +26,7 @@ local Players  = game:GetService("Players")
 local CS       = game:GetService("CollectionService")
 local RunSvc   = game:GetService("RunService")
 local UIS      = game:GetService("UserInputService")
+local VIM      = game:GetService("VirtualInputManager")
 local LP       = Players.LocalPlayer
 local PlayerGui= LP:WaitForChild("PlayerGui")
 
@@ -49,7 +50,7 @@ local GP = LP:FindFirstChild("GamePasses")
 local function owns(attr) return GP and GP:GetAttribute(attr) == true end
 
 --// State -------------------------------------------------------------------
-local Hub = { gui = nil, threads = {}, stopped = false, painted = 0, enforce = true, human = false }
+local Hub = { gui = nil, threads = {}, stopped = false, painted = 0, enforce = true, human = false, vim = false, vimDown = false }
 getgenv().__SprayHub = Hub
 
 function Hub.stopAll()
@@ -57,6 +58,8 @@ function Hub.stopAll()
 	for _, co in ipairs(Hub.threads) do pcall(task.cancel, co) end
 	Hub.threads = {}
 	Hub.stopped = false
+	-- if a VIM job was mid-drag, release the synthetic button so the cursor isn't stuck "held"
+	if Hub.vimDown then pcall(function() VIM:SendMouseButtonEvent(0, 0, 0, false, game, 1) end) Hub.vimDown = false end
 end
 
 --// Brush config ------------------------------------------------------------
@@ -161,10 +164,144 @@ local function flush()
 end
 
 local function colorKey(c) return ("%d,%d,%d"):format(math.floor(c.R*255+0.5), math.floor(c.G*255+0.5), math.floor(c.B*255+0.5)) end
+
+--// VIM input mode ------------------------------------------------------------
+-- Kick-safest mode: instead of calling MakePaint/cachePaint/flush ourselves we
+-- auto-equip the spray tool and drive the game's OWN PaintGui pipeline with
+-- synthetic mouse input (VirtualInputManager). Every WarnModule key, flush
+-- cadence, MinSpacing clamp and stroke/undo log is then game-generated =
+-- indistinguishable from a human holding M1. Slower (real game paint rate) and
+-- needs the target visible on screen. One stroke per color (server rule).
+local VIM_SPEED    = 650 -- cursor px/s (~fast human); Human Mode jitters it slower
+local VIM_GAP_MULT = 2.2 -- world gap > step*this between consecutive pts = pen lift
+local vimCalib = nil     -- Vector2: offset between VIM coords and the game-seen mouse pos
+
+local function vimCalibrate()
+	local tx, ty = 420, 320
+	VIM:SendMouseMoveEvent(tx, ty)
+	RunSvc.RenderStepped:Wait()
+	local m = UIS:GetMouseLocation()
+	vimCalib = Vector2.new(m.X - tx, m.Y - ty)
+end
+-- viewport point -> VIM coords (game sees m = sent + vimCalib, so send p - vimCalib)
+local function vimXY(p) return p.X - vimCalib.X, p.Y - vimCalib.Y end
+local function vimMove(p)
+	local x, y = vimXY(p) -- must bind first: multi-returns truncate mid-arglist
+	VIM:SendMouseMoveEvent(x, y)
+end
+local function vimPress(p, down)
+	Hub.vimDown = down
+	local x, y = vimXY(p)
+	VIM:SendMouseButtonEvent(x, y, 0, down, game, 1)
+end
+
+-- LO asked: auto-equip the spray tool if we're not already holding it
+local function ensureToolEquipped()
+	local char = LP.Character
+	local function isPaintTool(inst)
+		return inst:IsA("Tool") and (inst.Name:lower():find("spray") or inst.Name:lower():find("paint"))
+	end
+	if char then
+		for _, c in ipairs(char:GetChildren()) do if isPaintTool(c) then return true end end
+	end
+	local bp = LP:FindFirstChild("Backpack")
+	if not bp then return false end
+	local hum = char and char:FindFirstChildOfClass("Humanoid")
+	if not hum then return false end
+	for _, c in ipairs(bp:GetChildren()) do -- prefer the spray/paint tool
+		if isPaintTool(c) then hum:EquipTool(c) return true end
+	end
+	for _, c in ipairs(bp:GetChildren()) do -- fallback: any tool
+		if c:IsA("Tool") then hum:EquipTool(c) return true end
+	end
+	return false
+end
+
+local function vimPaintJob(blobList, opts)
+	opts = opts or {}
+	-- same GLOBAL per-color grouping as runPaintJob (server: one color per stroke)
+	local runs, seen = {}, {}
+	for _, b in ipairs(blobList) do
+		local ck = colorKey(b.color or currentColor())
+		local run = seen[ck]
+		if not run then run = { blobs = {} } seen[ck] = run table.insert(runs, run) end
+		table.insert(run.blobs, b)
+	end
+	local t = coroutine.create(function()
+		vimCalibrate()
+		if not ensureToolEquipped() then setStatus("VIM: no spray tool in Backpack - trying anyway") end
+		local cam = workspace.CurrentCamera
+		local vp = cam.ViewportSize
+		-- save/restore the UI brush: per-run we overwrite Brush.color so the enforce
+		-- loop (kept ON) re-asserts the stroke color against the game's ~1s PS reset.
+		local saved = { color = Brush.color, size = Brush.size, shape = Brush.shape, opacity = Brush.opacity }
+		local savedEnforce = Hub.enforce
+		Hub.enforce = true
+		local gapThresh = math.max(Brush.size, MIN_SPACING) * VIM_GAP_MULT
+		local painted, skipped, strokes = 0, 0, 0
+		local ok, err = pcall(function() -- an error mid-drag must NOT leave the pen held
+		for ri, run in ipairs(runs) do
+			if Hub.stopped then break end
+			local b0 = run.blobs[1]
+			Brush.color = b0.color or Brush.color
+			if b0.size then Brush.size = b0.size end
+			if b0.shape then Brush.shape = b0.shape end
+			pcall(applyBrush)
+			-- project to screen; drop behind-camera / offscreen (a human can't paint those either)
+			local pts = {}
+			for _, b in ipairs(run.blobs) do
+				if b.cf then
+					local sp = cam:WorldToViewportPoint(b.cf.Position)
+					if sp.Z > 0 and sp.X >= 0 and sp.X <= vp.X and sp.Y >= 0 and sp.Y <= vp.Y then
+						table.insert(pts, { p = Vector2.new(sp.X, sp.Y), w = b.cf.Position })
+					else
+						skipped = skipped + 1
+					end
+				end
+			end
+			if #pts > 0 then
+				vimMove(pts[1].p)
+				vimPress(pts[1].p, true); strokes = strokes + 1; painted = painted + 1
+				task.wait(0.08) -- let the game's Button1Down handler arm the paint loop
+				for i = 2, #pts do
+					if Hub.stopped then break end
+					local cur, prev = pts[i], pts[i - 1]
+					if (cur.w - prev.w).Magnitude > gapThresh then
+						-- disjoint spot (letters etc.): release, move, re-press like a real pen lift
+						vimPress(prev.p, false)
+						task.wait(Hub.human and 0.15 + math.random() * 0.2 or 0.08)
+						vimMove(cur.p)
+						vimPress(cur.p, true); strokes = strokes + 1
+						task.wait(0.05)
+					else
+						-- drag; game interpolates between samples each Heartbeat and
+						-- clamps MinSpacing itself, we just keep a human cursor speed
+						local s = VIM_SPEED * (Hub.human and (0.7 + math.random() * 0.6) or 1)
+						vimMove(cur.p)
+						task.wait(math.clamp((cur.p - prev.p).Magnitude / s, 0.012, 0.06))
+					end
+					painted = painted + 1
+				end
+				if Hub.vimDown then vimPress(pts[#pts].p, false) end
+				task.wait(0.25) -- let the game flush the stroke + log the undo event
+			end
+			if ri < #runs then task.wait(Hub.human and 0.4 + math.random() * 0.5 or 0.25) end
+		end
+		end); if not ok then setStatus("VIM error: " .. tostring(err)) end
+		if Hub.vimDown then pcall(function() VIM:SendMouseButtonEvent(0, 0, 0, false, game, 1) end) Hub.vimDown = false end
+		Hub.enforce = savedEnforce
+		Brush.color, Brush.size, Brush.shape, Brush.opacity = saved.color, saved.size, saved.shape, saved.opacity
+		Hub.painted = Hub.painted + painted
+		setStatus(("VIM done: %d pts, %d strokes, %d runs (%d off-screen skipped)"):format(painted, strokes, #runs, skipped))
+	end)
+	table.insert(Hub.threads, t)
+	coroutine.resume(t)
+end
 -- server persists ONE color per stroke (BUG#1: mixed-color batch dedups to 1 blob) ->
 -- split into per-color runs; each run is its own Stroke + its own flush.
 local function runPaintJob(blobList, opts)
 	opts = opts or {}
+	if Hub.vim then return vimPaintJob(blobList, opts) end
 	local batch = opts.batch or 40
 	-- group ALL blobs globally by color (one stroke per color, first-seen order) —
 	-- contiguous runs would shard interleaved images into a stroke per pixel.
@@ -1068,6 +1205,7 @@ btn("Shape: Octagon", function(b)
 end)
 toggle("Enforce Brush (manual paint)", function() return Hub.enforce end, function(v) Hub.enforce = v end)
 toggle("Human Mode (safer, slower)", function() return Hub.human end, function(v) Hub.human = v end)
+toggle("VIM Input (kick-safest, slow)", function() return Hub.vim end, function(v) Hub.vim = v end)
 effectToggle("Neon", "NeonPaint", function() return Brush.neon end, function(v) Brush.neon = v end)
 effectToggle("Chrome", "ChromePaint", function() return Brush.chrome end, function(v) Brush.chrome = v end)
 effectToggle("Rainbow", "RainbowPaint", function() return Brush.rainbow end, function(v) Brush.rainbow = v end)
